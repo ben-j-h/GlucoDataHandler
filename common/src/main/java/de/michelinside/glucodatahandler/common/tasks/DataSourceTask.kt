@@ -23,6 +23,7 @@ import java.math.RoundingMode
 import java.net.HttpURLConnection
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.Collections
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.max
 import androidx.core.content.edit
@@ -62,6 +63,7 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
             Constants.SHARED_PREF_DEXCOM_SHARE_PASSWORD,
             Constants.SHARED_PREF_DEXCOM_SHARE_SERVER,
             Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT,
+            Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK,
             Constants.SHARED_PREF_MEDTRUM_USER,
             Constants.SHARED_PREF_MEDTRUM_PASSWORD,
             Constants.SHARED_PREF_MEDTRUM_RECONNECT,
@@ -149,6 +151,10 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
                     Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT,
                     bundle.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT, false)
                 )
+                putBoolean(
+                    Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK,
+                    bundle.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK, false)
+                )
 
                 putString(
                     Constants.SHARED_PREF_MEDTRUM_USER,
@@ -196,6 +202,7 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
             bundle.putString(Constants.SHARED_PREF_DEXCOM_SHARE_PASSWORD, sharedPref.getString(Constants.SHARED_PREF_DEXCOM_SHARE_PASSWORD, ""))
             bundle.putString(Constants.SHARED_PREF_DEXCOM_SHARE_SERVER, sharedPref.getString(Constants.SHARED_PREF_DEXCOM_SHARE_SERVER, "eu"))
             bundle.putBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT, sharedPref.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT, false))
+            bundle.putBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK, sharedPref.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK, false))
 
             bundle.putString(Constants.SHARED_PREF_MEDTRUM_USER, sharedPref.getString(Constants.SHARED_PREF_MEDTRUM_USER, ""))
             bundle.putString(Constants.SHARED_PREF_MEDTRUM_PASSWORD, sharedPref.getString(Constants.SHARED_PREF_MEDTRUM_PASSWORD, ""))
@@ -205,6 +212,27 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
 
             return bundle
         }
+
+        // Timestamp of the newest value each source has reported - also if it was not new for the app, because
+        // another source delivered it first. Used to check, whether a primary source is still up to date.
+        private val latestServerValueTime = Collections.synchronizedMap(mutableMapOf<DataSource, Long>())
+
+        fun setLatestServerValueTime(source: DataSource, time: Long) {
+            if(time > getLatestServerValueTime(source))
+                latestServerValueTime[source] = time
+        }
+
+        fun getLatestServerValueTime(source: DataSource): Long = latestServerValueTime[source] ?: 0L
+
+        // Last time each source answered successfully (with or without a new value) - to distinguish
+        // "server not reachable" from "server reachable, but without new data".
+        private val lastContactTime = Collections.synchronizedMap(mutableMapOf<DataSource, Long>())
+
+        fun setLastContactTime(source: DataSource, time: Long = System.currentTimeMillis()) {
+            lastContactTime[source] = time
+        }
+
+        fun getLastContactTime(source: DataSource): Long = lastContactTime[source] ?: 0L
 
         fun getFirstNeedGraphValueTime(interval: Int, isFirstRequest: Boolean = false, forceReturnMinTime: Boolean = false): Long {
             val firstLastPair = dbAccess.getFirstLastTimestamp()
@@ -256,6 +284,8 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
         }
         lastErrorCode = code
         lastState = state
+        if(state == SourceState.CONNECTED || state == SourceState.NO_NEW_VALUE)
+            setLastContactTime(source)
 
         SourceStateData.setState(source, state, getErrorMessage(state, error, code), getErrorInfo(code, message))
     }
@@ -344,6 +374,8 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
     protected fun handleIobResult(extras: Bundle) {
         if(Log.isLoggable(LOG_ID, android.util.Log.DEBUG))
             Log.d(LOG_ID, "handleIobResult for $source: ${Utils.dumpBundle(extras)}")
+        if(extras.containsKey(ReceiveData.TIME))
+            setLatestServerValueTime(source, extras.getLong(ReceiveData.TIME))
         if(!ReceiveData.hasNewIobCob(extras)) {
             setState(SourceState.CONNECTED)
             return
@@ -362,6 +394,8 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
     protected fun handleResult(extras: Bundle) {
         if(Log.isLoggable(LOG_ID, android.util.Log.DEBUG))
             Log.d(LOG_ID, "handleResult for $source: ${Utils.dumpBundle(extras)}")
+        if(extras.containsKey(ReceiveData.TIME))
+            setLatestServerValueTime(source, extras.getLong(ReceiveData.TIME))
         if(!ReceiveData.hasNewValue(extras)) {
             if(extras.containsKey(ReceiveData.TIME)) {
                 val valueTime = extras.getLong(ReceiveData.TIME)

@@ -6,6 +6,7 @@ import android.os.Bundle
 import de.michelinside.glucodatahandler.common.utils.Log
 import de.michelinside.glucodatahandler.common.BuildConfig
 import de.michelinside.glucodatahandler.common.Constants
+import de.michelinside.glucodatahandler.common.GlucoDataService
 import de.michelinside.glucodatahandler.common.ReceiveData
 import de.michelinside.glucodatahandler.common.database.GlucoseValue
 import de.michelinside.glucodatahandler.common.database.dbAccess
@@ -18,6 +19,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.NumberFormatException
 import java.math.RoundingMode
+import java.net.HttpURLConnection
+import java.time.OffsetDateTime
 import kotlin.math.min
 
 class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENABLED, DataSource.NIGHTSCOUT) {
@@ -31,6 +34,47 @@ class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENAB
         const val PEBBLE_ENDPOINT = "/pebble"
         const val ENTRIES_ENDPOINT = "/api/v1/entries/current.json"
         const val GRAPHDATA_ENDPOINT = "/api/v1/entries/sgv.json?find[date][\$gt]=%d&count=%d"
+        const val SITE_CHANGE_ENDPOINT = "/api/v1/treatments.json?find[eventType]=Site%20Change&count=10"
+        private const val SITE_CHANGE_CHECK_INTERVAL_MS = 15 * 60 * 1000L
+
+        private fun getTreatmentTime(entry: JSONObject): Long {
+            if (entry.optLong("mills", 0L) > 0L)
+                return entry.optLong("mills")
+            val createdAt = entry.optString("created_at")
+            if (createdAt.isNotEmpty()) {
+                try {
+                    // ISO 8601 - some uploaders use a space instead of the 'T'
+                    return OffsetDateTime.parse(createdAt.trim().replaceFirst(' ', 'T')).toInstant().toEpochMilli()
+                } catch (exc: Exception) {
+                    Log.w(LOG_ID, "Invalid created_at in treatment: $createdAt")
+                }
+            }
+            return entry.optLong("date", 0L)
+        }
+
+        // tconnectsync uploads cartridge, cannula and tubing fills all as "Site Change". Only the cannula fill
+        // is a new infusion site, so if the newest entry is a cartridge or tubing fill, the newest cannula fill
+        // is used instead. Entries without such a reason (e.g. entered in Nightscout) are used as they are.
+        fun getSiteChangeTime(entries: JSONArray): Long {
+            var newest = 0L
+            var newestIsFillOnly = false
+            var newestCannula = 0L
+            val maxTime = System.currentTimeMillis() + 5 * 60 * 1000L
+            for (i in 0 until entries.length()) {
+                val entry = entries.optJSONObject(i) ?: continue
+                val time = getTreatmentTime(entry)
+                if (time <= 0L || time > maxTime)
+                    continue
+                val text = (entry.optString("reason") + " " + entry.optString("notes")).lowercase()
+                if (text.contains("cannula") && time > newestCannula)
+                    newestCannula = time
+                if (time > newest) {
+                    newest = time
+                    newestIsFillOnly = text.contains("cartridge") || text.contains("tubing")
+                }
+            }
+            return if (newestIsFillOnly && newestCannula > 0L) newestCannula else newest
+        }
 
         fun parsePebbleIobCob(jsonObject: JSONObject, bundle: Bundle): Boolean {
             var result = false
@@ -89,7 +133,31 @@ class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENAB
         return false
     }
 
+    private var lastSiteChangeCheck = 0L
+
+    // Reads the last pump site change. Uses its own request, so an error here (e.g. no permission to read
+    // treatments) never affects the state of the glucose source.
+    private fun checkSiteChange() {
+        if (System.currentTimeMillis() - lastSiteChangeCheck < SITE_CHANGE_CHECK_INTERVAL_MS)
+            return
+        lastSiteChangeCheck = System.currentTimeMillis()
+        try {
+            val request = HttpRequest()
+            if (request.get(getUrl(SITE_CHANGE_ENDPOINT), getHeader(), getTrustAllCertificates()) != HttpURLConnection.HTTP_OK || request.response.isNullOrEmpty()) {
+                Log.w(LOG_ID, "Site change request failed: ${request.code} - ${request.responseMessage}")
+                return
+            }
+            val changeTime = getSiteChangeTime(JSONArray(request.response))
+            Log.d(LOG_ID, "Site change time: ${Utils.getUiTimeStamp(changeTime)}")
+            if (changeTime > 0L)
+                ReceiveData.setSiteChangeTime(GlucoDataService.context!!, changeTime)
+        } catch (exc: Exception) {
+            Log.e(LOG_ID, "checkSiteChange exception: " + exc.message.toString())
+        }
+    }
+
     override fun getValue() : Boolean {
+        checkSiteChange()
         val firstNeededValue = getFirstNeedGraphValueTime(1, firstGetValue, true) // always use entries for getting data
         if (firstNeededValue > 0) {
             if(getGraphData(firstNeededValue) && !iob_cob_support) {
@@ -117,6 +185,9 @@ class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENAB
 
     override fun getTrustAllCertificates(): Boolean = true
 
+    // explains, whether Dexcom Share (fallback) has data, while Nightscout has none
+    override fun getNoNewValueInfo(time: Long): String = DexcomShareSourceTask.fallbackInfo
+
     override fun checkPreferenceChanged(sharedPreferences: SharedPreferences, key: String?, context: Context): Boolean {
         var result = false
         if (key == null) {
@@ -131,6 +202,7 @@ class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENAB
             when(key) {
                 Constants.SHARED_PREF_NIGHTSCOUT_URL -> {
                     url = sharedPreferences.getString(Constants.SHARED_PREF_NIGHTSCOUT_URL, "")!!.trim().trimEnd('/')
+                    lastSiteChangeCheck = 0L
                     result = true
                 }
                 Constants.SHARED_PREF_NIGHTSCOUT_SECRET -> {
@@ -211,6 +283,7 @@ class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENAB
                 return Pair(false, "Missing values in response: $jsonObject")
 
             val valueTime = jsonObject.getLong("date")
+            setLatestServerValueTime(source, valueTime)
             if(valueTime < firstValueTime)
                 return Pair(true, "")   // no new value
             val glucoExtras = Bundle()

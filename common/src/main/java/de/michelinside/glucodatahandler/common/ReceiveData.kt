@@ -21,6 +21,7 @@ import de.michelinside.glucodatahandler.common.utils.Utils
 import de.michelinside.glucodatahandler.common.utils.WakeLockHelper
 import java.math.RoundingMode
 import java.text.DateFormat
+import java.time.Duration
 import java.util.*
 import androidx.core.content.edit
 
@@ -39,6 +40,7 @@ object ReceiveData: SharedPreferences.OnSharedPreferenceChangeListener {
     const val IOBCOB_TIME = "gdh.IOB_COB_time"
     const val SENSOR_START_TIME = "gdh.sensor_start_time"
     const val SENSOR_ID = "gdh.sensor_id"   // used for start time, otherwise the serial is used
+    const val SITE_CHANGE_TIME = "gdh.site_change_time"   // last pump infusion site change (e.g. from Nightscout)
     const val DELTA_FALLING_COUNT = "gdh.delta_falling_count"
     const val DELTA_RISING_COUNT = "gdh.delta_rising_count"
 
@@ -56,6 +58,8 @@ object ReceiveData: SharedPreferences.OnSharedPreferenceChangeListener {
             return startTimePair.second
         return 0L
     }
+    var siteChangeTime: Long = 0L
+        private set
     var rawValue: Int = 0
     var glucose: Float = 0.0F
     var sourceRate = Float.NaN
@@ -676,6 +680,9 @@ object ReceiveData: SharedPreferences.OnSharedPreferenceChangeListener {
                         }
                     }
 
+                    if(extras.getLong(SITE_CHANGE_TIME, 0L) > 0L)
+                        setSiteChangeTime(context, extras.getLong(SITE_CHANGE_TIME))
+
                     sourceRate = extras.getFloat(RATE) //Rate of change of glucose. See libre and dexcom label functions
 
                     if(!readCalculatedBundle(extras)) {
@@ -958,6 +965,8 @@ object ReceiveData: SharedPreferences.OnSharedPreferenceChangeListener {
         extras.putString(SERIAL, sensorID)
         extras.putLong(SENSOR_START_TIME, sensorStartTime)
         extras.putString(SENSOR_ID, startTimePair.first)
+        if(siteChangeTime > 0L)
+            extras.putLong(SITE_CHANGE_TIME, siteChangeTime)
         extras.putFloat(RATE, rate)
         extras.putInt(ALARM, alarm)
         extras.putFloat(DELTA, deltaValue)
@@ -1030,6 +1039,7 @@ object ReceiveData: SharedPreferences.OnSharedPreferenceChangeListener {
         try {
             if (time == 0L) {
                 val sharedGlucosePref = context.getSharedPreferences(Constants.GLUCODATA_BROADCAST_ACTION, Context.MODE_PRIVATE)
+                siteChangeTime = sharedGlucosePref.getLong(SITE_CHANGE_TIME, 0L)
                 if (sharedGlucosePref.contains(TIME)) {
                     Log.i(LOG_ID, "Reading saved values...")
                     val newTime = sharedGlucosePref.getLong(TIME, 0L)
@@ -1096,6 +1106,34 @@ object ReceiveData: SharedPreferences.OnSharedPreferenceChangeListener {
         } catch (exc: Exception) {
             Log.e(LOG_ID, "onSharedPreferenceChanged exception: " + exc.toString() + "\n" + exc.stackTraceToString() )
         }
+    }
+
+    // age of the pump infusion site as "1d 5h" - empty, if unknown or too old to be the current site
+    fun getSiteAgeAsString(context: Context): String {
+        if(siteChangeTime <= 0L)
+            return ""
+        val duration = Duration.ofMillis(System.currentTimeMillis() - siteChangeTime)
+        if(duration.isNegative || duration.toDays() >= 14)
+            return ""
+        val days = duration.toDays()
+        return context.getString(R.string.sensor_age_value).format(days, duration.minusDays(days).toHours())
+    }
+
+    fun setSiteChangeTime(context: Context, changeTime: Long): Boolean {
+        if(changeTime <= 0L || changeTime == siteChangeTime)
+            return false
+        Log.i(LOG_ID, "setSiteChangeTime: " + Utils.getUiTimeStamp(changeTime))
+        siteChangeTime = changeTime
+        try {
+            // stored separately, as it is also received between glucose values
+            context.getSharedPreferences(Constants.GLUCODATA_BROADCAST_ACTION, Context.MODE_PRIVATE).edit {
+                putLong(SITE_CHANGE_TIME, changeTime)
+            }
+        } catch (exc: Exception) {
+            Log.e(LOG_ID, "Saving site change time exception: " + exc.toString())
+        }
+        InternalNotifier.notify(context, NotifySource.SENSOR_AGE_CHANGED, null)
+        return true
     }
 
     fun setSensorStartTime(serialId: String?, startTime: Long, checkStartTime: Boolean = false): Boolean {

@@ -57,6 +57,26 @@ class HttpRequest {
         fun isLocalHost(url: String): Boolean {
             return url.contains("127.0.0.1") || url.lowercase().contains("localhost")
         }
+
+        private val IPV4_REGEX = Regex("""^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$""")
+
+        // Servers in the local network (e.g. a self-hosted Nightscout with a self-signed certificate).
+        fun isLocalNetworkHost(url: String): Boolean {
+            val host = try { URL(url).host.lowercase() } catch (exc: Exception) { return false }
+            if (host == "localhost" || host.endsWith(".local") || host.endsWith(".lan") || host.endsWith(".home.arpa"))
+                return true
+            val ip = IPV4_REGEX.matchEntire(host) ?: return false
+            val first = ip.groupValues[1].toInt()
+            val second = ip.groupValues[2].toInt()
+            return first == 10 || first == 127 || (first == 192 && second == 168) || (first == 172 && second in 16..31)
+        }
+
+        private val SECRET_QUERY_REGEX = Regex("""([?&](?:token|secret|api_secret|sessionId|password)=)[^&]*""", RegexOption.IGNORE_CASE)
+
+        // Credentials in the query (Nightscout token, Dexcom session id) must not end up in the logs.
+        fun redactUrl(url: String): String {
+            return url.replace(SECRET_QUERY_REGEX, "$1***")
+        }
     }
 
     fun stop() {
@@ -98,7 +118,9 @@ class HttpRequest {
                 conn = urlConnection as HttpURLConnection
 
                 // 1. SET SSL/Trust BEFORE anything else
-                if (trustAllCertificates && conn is HttpsURLConnection) {
+                // Skipping the certificate check is only allowed for local network servers: for public servers
+                // it would let any man-in-the-middle read the credentials and inject fake glucose values.
+                if (trustAllCertificates && conn is HttpsURLConnection && isLocalNetworkHost(url)) {
                     trustAllCertificates(conn)
                 }
 
@@ -131,10 +153,10 @@ class HttpRequest {
                     conn.doOutput = false
                 }
 
-                Log.i(LOG_ID, "${conn.requestMethod} - request to $url")
+                Log.i(LOG_ID, "${conn.requestMethod} - request to ${redactUrl(url)}")
                 handleResponse(conn)
             } catch (exc: Exception) {
-                Log.e(LOG_ID, "request exception: " + exc.toString())
+                Log.e(LOG_ID, "request exception: " + redactUrl(exc.toString()))
                 lastError = exc.toString()
                 lastMessage = exc.message
             } finally {

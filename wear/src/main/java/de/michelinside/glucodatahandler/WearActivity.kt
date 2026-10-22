@@ -559,6 +559,9 @@ class WearActivity : AppCompatActivity(), NotifierInterface {
                 tableDetails.addView(createRow(CR.string.sensor_age_label, resources.getString(CR.string.sensor_age_value).format(days, hours)))
 
             }
+            val siteAge = ReceiveData.getSiteAgeAsString(this)
+            if(siteAge.isNotEmpty())
+                tableDetails.addView(createRow(CR.string.site_age_label, siteAge))
             if(ReceiveData.source != DataSource.NONE)
                 tableDetails.addView(createRow(CR.string.info_label_source, resources.getString(ReceiveData.source.resId)))
         }

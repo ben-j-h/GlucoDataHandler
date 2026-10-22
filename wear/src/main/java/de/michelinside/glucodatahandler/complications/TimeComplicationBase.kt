@@ -137,3 +137,40 @@ class SensorAgeComplication: BgValueComplicationService() {
         return this.getString(R.string.sensor_age_label) + " " + this.getString(R.string.not_available)
     }
 }
+// Age of the pump infusion site (e.g. "Site Change" treatments from Nightscout)
+class SiteAgeComplication: BgValueComplicationService() {
+    companion object {
+        private const val SITE_RUNTIME_MINUTES = 3F * 24 * 60   // infusion sets are usually changed every 3 days
+    }
+
+    private fun ageText(): String {
+        val age = ReceiveData.getSiteAgeAsString(this)
+        return age.ifEmpty { "---" }
+    }
+
+    override fun getText(): PlainComplicationText = plainText(ageText())
+    override fun getIcon(id: Int): MonochromaticImage = unicodeIcon(id, "🩹")
+
+    override fun getRangeValueComplicationData(id: Int): ComplicationData {
+        val minutes = if(ReceiveData.getSiteAgeAsString(this).isNotEmpty())
+            Duration.ofMillis(System.currentTimeMillis() - ReceiveData.siteChangeTime).toMinutes().toFloat()
+        else
+            0F
+
+        return RangedValueComplicationData.Builder(
+            value = Utils.rangeValue(minutes, 0F, SITE_RUNTIME_MINUTES),
+            min = 0F,
+            max = SITE_RUNTIME_MINUTES,
+            contentDescription = descriptionText(),
+        )
+            .setText(getText())
+            .setMonochromaticImage(getIcon(id))
+            .setTapAction(PackageUtils.getTapActionIntent(this, this.packageName, id))
+            .build()
+    }
+
+    override fun getDescription(): String {
+        val age = ReceiveData.getSiteAgeAsString(this)
+        return this.getString(R.string.site_age_label) + " " + age.ifEmpty { this.getString(R.string.not_available) }
+    }
+}

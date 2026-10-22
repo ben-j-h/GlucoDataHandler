@@ -36,7 +36,9 @@ class GlucoseDetailsTileService : TileService() {
         private const val VALUE_TEXT_PX = 100
         private const val VALUE_ARROW_PX = 80
         private const val VALUE_IMAGE_WIDTH_PX = VALUE_TEXT_PX + VALUE_ARROW_PX
-        private const val FRESHNESS_INTERVAL_MS = 60_000L
+        // The "X min" text ticks on its own (dynamic expression) and new values push an update, so the
+        // platform refresh is only a fallback - no need to rebuild the tile (and its bitmaps) every minute.
+        private const val FRESHNESS_INTERVAL_MS = 5 * 60_000L
 
         private fun registerValue(context: Context) {
             if (!ValueBitmapHandler.isRegistered(WIDGET_ID))
@@ -146,12 +148,18 @@ class GlucoseDetailsTileService : TileService() {
             ReceiveData.getGlucoseAsOtherUnit() + " " + ReceiveData.getOtherUnit()
         } else ""
 
-        if (sensorAge.isNotEmpty() || otherUnit.isNotEmpty()) {
-            if (sensorAge.isNotEmpty()) {
-                frame.addContent(deltaLine(sensorAge, 14f))
+        // pump site age (e.g. from Nightscout) in the same line as the sensor age
+        val siteAge = ReceiveData.getSiteAgeAsString(this)
+        val ageLine = listOf(sensorAge, if (siteAge.isNotEmpty()) "🩹 $siteAge" else "")
+            .filter { it.isNotEmpty() }
+            .joinToString("  ")
+
+        if (ageLine.isNotEmpty() || otherUnit.isNotEmpty()) {
+            if (ageLine.isNotEmpty()) {
+                frame.addContent(deltaLine(ageLine, 14f))
             }
             if (otherUnit.isNotEmpty()) {
-                if (sensorAge.isNotEmpty())
+                if (ageLine.isNotEmpty())
                     frame.addContent(spacer(3f))
                 frame.addContent(deltaLine(otherUnit, 16f))
             }

@@ -37,6 +37,7 @@ object ActiveComplicationHandler: NotifierInterface {
         if(!complicationClasses.containsKey(id)) {
             Log.i(LOG_ID, "Add complication for id $id: ${component.shortClassName}")
             complicationClasses[id] = component
+            checkTimeComplicationChanged()
         }
     }
 
@@ -45,6 +46,33 @@ object ActiveComplicationHandler: NotifierInterface {
             Log.i(LOG_ID, "Remove complication for id $id")
             complicationClasses.remove(id)
             noComplication = complicationClasses.isEmpty()
+            checkTimeComplicationChanged()
+        }
+    }
+
+    private fun isTimeComplication(component: ComponentName): Boolean {
+        return try {
+            TimeComplicationBase::class.java.isAssignableFrom(Class.forName(component.className))
+        } catch (exc: Exception) {
+            true  // unknown, so better keep updating it
+        }
+    }
+
+    // Only complications showing the elapsed time need the minute updates - all others are updated on
+    // new values and obsolete changes. As long as the active complications are not known, assume yes.
+    val hasTimeComplication: Boolean get() {
+        if(complicationClasses.isEmpty())
+            return !noComplication
+        return complicationClasses.values.any { isTimeComplication(it) }
+    }
+
+    private var lastHasTimeComplication: Boolean? = null
+    private fun checkTimeComplicationChanged() {
+        val hasTime = hasTimeComplication
+        if(lastHasTimeComplication != hasTime) {
+            Log.i(LOG_ID, "Time complication active changed to $hasTime")
+            lastHasTimeComplication = hasTime
+            (GlucoDataService.service as? GlucoDataServiceWear)?.updateComplicationFilter()
         }
     }
 
@@ -159,6 +187,8 @@ object ActiveComplicationHandler: NotifierInterface {
                         // upgrade all at once can cause a disappear of icon and images in ambient mode,
                         // so use some delay!
                         complicationClasses.forEach {
+                            if (dataSource == NotifySource.TIME_VALUE && !forceUpdataAll && !isTimeComplication(it.value))
+                                return@forEach  // only the elapsed time has changed
                             if (dataSource != NotifySource.TIME_VALUE && !forceUpdataAll)
                                 Thread.sleep(50)  // add delay to prevent disappearing complication icons in ambient mode
                             ComplicationDataSourceUpdateRequester
@@ -202,6 +232,7 @@ object ActiveComplicationHandler: NotifierInterface {
                                 }
                             }
                         }
+                        checkTimeComplicationChanged()
                     }
                     forceUpdataAll = false
                 }

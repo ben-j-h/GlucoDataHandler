@@ -31,6 +31,23 @@ class DexcomShareSourceTask : DataSourceTask(Constants.SHARED_PREF_DEXCOM_SHARE_
         private var user = ""
         private var password = ""
         private var reconnect = false
+        private var fallbackOnly = false
+        private var lastFallbackRequestTime = 0L
+
+        // Dexcom Share is only used, if Nightscout has not reported a value for this time (two missed readings)
+        private const val FALLBACK_AFTER_MINUTES = 10L
+        // Nightscout counts as reachable, if it answered within this time
+        private const val NIGHTSCOUT_REACHABLE_MINUTES = 10L
+        // Nightscout is reachable, but has no new data: most likely there is no data upstream either (sensor out
+        // of range, uploading phone offline), so only check Dexcom Share at this interval
+        private const val PROBE_INTERVAL_MS = 15 * 60 * 1000L
+        // Dexcom Share itself has had no new value for this time: limit the requests to one per 5 minutes
+        private const val NO_UPSTREAM_DATA_MINUTES = 15L
+        private const val NO_UPSTREAM_DATA_INTERVAL_MS = 5 * 60 * 1000L
+
+        // Explanation of the current fallback situation, shown as info for the Nightscout source state
+        var fallbackInfo = ""
+            private set
         private var server = ""
         private var sessionId: String? = null
 
@@ -311,6 +328,71 @@ class DexcomShareSourceTask : DataSourceTask(Constants.SHARED_PREF_DEXCOM_SHARE_
         }
     }
 
+    private enum class FallbackMode {
+        NORMAL,                 // no fallback mode
+        STANDBY,                // Nightscout is up to date
+        NIGHTSCOUT_UNREACHABLE, // Nightscout does not answer -> use Dexcom Share
+        NIGHTSCOUT_BEHIND,      // Dexcom Share has newer values than Nightscout -> use Dexcom Share
+        NO_UPSTREAM_DATA        // Nightscout answers but has no new data -> only check Dexcom Share rarely
+    }
+
+    private fun getFallbackMode(): FallbackMode {
+        if(!fallbackOnly || GlucoDataService.sharedPref?.getBoolean(Constants.SHARED_PREF_NIGHTSCOUT_ENABLED, false) != true)
+            return FallbackMode.NORMAL
+        val nightscoutTime = getLatestServerValueTime(DataSource.NIGHTSCOUT)
+        if(nightscoutTime > 0L && Utils.getElapsedTimeMinute(nightscoutTime) < FALLBACK_AFTER_MINUTES)
+            return FallbackMode.STANDBY
+        val lastContact = getLastContactTime(DataSource.NIGHTSCOUT)
+        if(lastContact == 0L || Utils.getElapsedTimeMinute(lastContact) >= NIGHTSCOUT_REACHABLE_MINUTES)
+            return FallbackMode.NIGHTSCOUT_UNREACHABLE  // also after startup, until Nightscout has answered
+        if(getLatestServerValueTime(DataSource.DEXCOM_SHARE) > nightscoutTime + 60000L)
+            return FallbackMode.NIGHTSCOUT_BEHIND
+        return FallbackMode.NO_UPSTREAM_DATA
+    }
+
+    // returns false, if the request should be skipped to not flood Dexcom with requests for data that does not exist
+    private fun checkFallbackRequest(mode: FallbackMode): Boolean {
+        val elapsedMs = System.currentTimeMillis() - lastFallbackRequestTime
+        val dexcomTime = getLatestServerValueTime(DataSource.DEXCOM_SHARE)
+        val allowed = when(mode) {
+            FallbackMode.NORMAL -> true
+            FallbackMode.STANDBY -> false
+            FallbackMode.NO_UPSTREAM_DATA -> elapsedMs >= PROBE_INTERVAL_MS
+            FallbackMode.NIGHTSCOUT_UNREACHABLE,
+            FallbackMode.NIGHTSCOUT_BEHIND -> dexcomTime == 0L || Utils.getElapsedTimeMinute(dexcomTime) < NO_UPSTREAM_DATA_MINUTES || elapsedMs >= NO_UPSTREAM_DATA_INTERVAL_MS
+        }
+        if(allowed && mode != FallbackMode.NORMAL)
+            lastFallbackRequestTime = System.currentTimeMillis()
+        return allowed
+    }
+
+    private fun updateFallbackInfo(mode: FallbackMode) {
+        val context = GlucoDataService.context ?: return
+        fallbackInfo = when(mode) {
+            FallbackMode.NORMAL,
+            FallbackMode.STANDBY -> ""
+            FallbackMode.NIGHTSCOUT_UNREACHABLE -> context.getString(R.string.fallback_nightscout_unreachable)
+            FallbackMode.NIGHTSCOUT_BEHIND -> context.getString(R.string.fallback_nightscout_behind)
+            FallbackMode.NO_UPSTREAM_DATA -> {
+                if(lastFallbackRequestTime > 0L)
+                    context.getString(R.string.fallback_no_upstream_data, Utils.getUiTimeStamp(lastFallbackRequestTime))
+                else
+                    ""
+            }
+        }
+    }
+
+    override fun execute(context: Context, force: Boolean) {
+        val mode = getFallbackMode()
+        if(checkFallbackRequest(mode)) {
+            super.execute(context, force)
+        } else {
+            Log.d(LOG_ID, "Skip Dexcom Share request in fallback mode $mode")
+        }
+        // the request may have changed the mode (e.g. Dexcom Share has newer data than Nightscout)
+        updateFallbackInfo(getFallbackMode())
+    }
+
     override fun interrupt() {
         super.interrupt()
         Log.w(LOG_ID, "Interrupt called!")
@@ -324,6 +406,7 @@ class DexcomShareSourceTask : DataSourceTask(Constants.SHARED_PREF_DEXCOM_SHARE_
             user = sharedPreferences.getString(Constants.SHARED_PREF_DEXCOM_SHARE_USER, "")!!.trim()
             password = sharedPreferences.getString(Constants.SHARED_PREF_DEXCOM_SHARE_PASSWORD, "")!!.trim()
             server = sharedPreferences.getString(Constants.SHARED_PREF_DEXCOM_SHARE_SERVER, "eu") ?: "eu"
+            fallbackOnly = sharedPreferences.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK, false)
             InternalNotifier.notify(GlucoDataService.context!!, NotifySource.SOURCE_STATE_CHANGE, null)
             trigger = true
         } else {
@@ -350,6 +433,11 @@ class DexcomShareSourceTask : DataSourceTask(Constants.SHARED_PREF_DEXCOM_SHARE_
                         InternalNotifier.notify(GlucoDataService.context!!, NotifySource.SOURCE_STATE_CHANGE, null)
                         trigger = true
                     }
+                }
+                Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK -> {
+                    fallbackOnly = sharedPreferences.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_FALLBACK, false)
+                    Log.i(LOG_ID, "Fallback only changed to $fallbackOnly")
+                    trigger = true
                 }
                 Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT -> {
                     if (reconnect != sharedPreferences.getBoolean(Constants.SHARED_PREF_DEXCOM_SHARE_RECONNECT, false)) {

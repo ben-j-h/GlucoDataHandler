@@ -54,6 +54,10 @@ class  GlucoDataServiceWear: GlucoDataService(AppSource.WEAR_APP), NotifierInter
     private fun updateComplicationNotifier() {
         Log.d(LOG_ID, "updateComplicationNotifier called")
         ActiveComplicationHandler.checkAlwaysUpdateComplications(this)
+        updateComplicationFilter()
+    }
+
+    fun updateComplicationFilter() {
         val filter = mutableSetOf(
             NotifySource.MESSAGECLIENT,
             NotifySource.BROADCAST,
@@ -62,10 +66,13 @@ class  GlucoDataServiceWear: GlucoDataService(AppSource.WEAR_APP), NotifierInter
             NotifySource.SENSOR_AGE_CHANGED
         )
 
-        if(ActiveComplicationHandler.canUpdateComplications(NotifySource.TIME_VALUE) && (sharedPref == null || sharedPref!!.getBoolean(Constants.SHARED_PREF_RELATIVE_TIME, true))) {
+        // the time value keeps a wake-up alarm running every minute, so only use it, if a complication shows the elapsed time
+        if(ActiveComplicationHandler.hasTimeComplication && ActiveComplicationHandler.canUpdateComplications(NotifySource.TIME_VALUE) && (sharedPref == null || sharedPref!!.getBoolean(Constants.SHARED_PREF_RELATIVE_TIME, true))) {
             Log.v(LOG_ID, "add time value filter - display off: ${ScreenEventReceiver.isDisplayOff()}")
             filter.add(NotifySource.TIME_VALUE)
-        } else if(!ReceiveData.isObsoleteLong() && ActiveComplicationHandler.canUpdateComplications(NotifySource.OBSOLETE_VALUE)) {
+        }
+        // obsolete is needed for all other complications (the obsolete task stops itself for long obsolete values)
+        if(ActiveComplicationHandler.canUpdateComplications(NotifySource.OBSOLETE_VALUE)) {
             filter.add(NotifySource.OBSOLETE_VALUE)
         }
 
