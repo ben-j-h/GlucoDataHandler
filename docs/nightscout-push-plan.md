@@ -38,8 +38,18 @@ independently: **Part A** is infrastructure, **Part B** is the push relay (built
 
 1. Push from the relay (Part B/C, future).
 2. GDH polls Nightscout through the tunnel (works today with the existing Nightscout source).
-3. GDH polls Dexcom Share directly, only once Nightscout has not reported a value for 10 minutes
-   (implemented in this branch: Dexcom Share setting **"Only as fallback for Nightscout"**).
+3. GDH polls Dexcom Share directly (implemented in this branch: Dexcom Share setting
+   **"Only as fallback for Nightscout"**), depending on *why* Nightscout has no current value:
+
+   | Situation (Nightscout's newest value ≥ 10 min old) | Dexcom Share requests per phone | Status shown in the app |
+   |---|---|---|
+   | Nightscout up to date | none | – |
+   | Nightscout not answering for 10 min (server, tunnel, home internet down) | normal | "Nightscout not reachable – using Dexcom Share" |
+   | Nightscout answers, Dexcom Share has newer values (server's Dexcom link broken) | normal | "Nightscout is not receiving new values …" |
+   | Nightscout answers, Dexcom Share has nothing newer either (sensor out of range, uploading phone offline, warm-up) | one check per 15 min | "No newer data on Dexcom Share either (checked HH:MM) …" |
+   | Dexcom Share itself has had no new value for 15 min while in fallback | at most one per 5 min | as above |
+
+   The status appears below the connection state on the phone and watch main screens.
 4. Independent of all of the above: the official **Dexcom Follow** app with its own alarms stays
    installed on at least one phone. Everything in this document has single points of failure
    (home internet, Proxmox host, Cloudflare, Firebase).
@@ -84,7 +94,11 @@ API on the LAN, so Nightscout can be upgraded independently.
    prefer the newest *Cannula Filled* entry if the newest entry is only a cartridge/tubing fill).
 3. Decide the priority (below), encrypt the payload, send it to the FCM topic via the
    **FCM HTTP v1 API** using a Firebase service account (key stays on the relay only).
-4. Expose a local health endpoint (last Nightscout value time, last FCM send result) for HA/monitoring.
+4. Send a **status message** (NORMAL priority) whenever the upstream state changes and every 15 minutes
+   while there is no new value, so the phones know *why* there is no data without asking Dexcom
+   themselves (see `status` in section 5). With push working, the phones' Dexcom checks during a
+   sensor gap drop to zero.
+5. Expose a local health endpoint (last Nightscout value time, last FCM send result) for HA/monitoring.
 
 ### Priority policy
 
@@ -166,6 +180,20 @@ Send with `android.priority = HIGH` when **any** of these is true, otherwise `NO
 - `seq` increases by one per message, so the app can detect gaps and replays (ignore `seq` ≤ last seen,
   except after the relay restarts – the relay should persist `seq`).
 - `direction` uses Nightscout's names (`DoubleUp` … `DoubleDown`, `NOT COMPUTABLE`).
+- `status` (optional, always present in status-only messages without `sgv`):
+
+  ```json
+  "status": {
+    "upstream": "ok | no_data | dexcom_error | dexcom_auth_error",
+    "last_value": 1761139990000,
+    "checked": 1761140000000
+  }
+  ```
+
+  `no_data` = Dexcom answered but has no newer value (sensor/uploader not sending). `dexcom_error` /
+  `dexcom_auth_error` = the server cannot get data from Dexcom; the app should then use its own
+  Dexcom fallback. Where the relay gets this from depends on what Nightscout exposes about its Dexcom
+  connection (open question); otherwise the relay can query Dexcom Share itself, as the single poller.
 
 ## 6. Part C – GDH app work
 
@@ -173,7 +201,8 @@ Done in branch `claude/watch-battery-tandem-pump-bmv8mk`:
 
 - Watch battery fixes (no per-minute wake-ups from tiles; only time complications get minute updates).
 - TLS certificates are verified for public Nightscout servers; credentials are masked in logs.
-- Dexcom Share **fallback-only** mode (10 minutes without a Nightscout value).
+- Dexcom Share **fallback-only** mode: distinguishes "Nightscout unreachable", "Nightscout behind
+  Dexcom" and "no data upstream" (rate-limited checks), see section 2.
 - Pump **site age** from Nightscout `Site Change` treatments (checked every 15 min), passed to the
   watch with each value, shown on phone and watch main screens, the details tile, and a new
   *Pump site age* complication.
@@ -185,13 +214,36 @@ To do once the relay exists:
 3. Decrypt + validate (`v`, `kid`, GCM tag, `seq`, `sgv.date` not older than 15 min), then feed the value
    into `ReceiveData.handleIntent()` like the Nightscout source does, and call
    `DataSourceTask.setLatestServerValueTime(DataSource.NIGHTSCOUT, sgv.date)` so the Dexcom fallback
-   treats push as "Nightscout is up to date". Pass `site_change` to `ReceiveData.setSiteChangeTime()`.
+   treats push as "Nightscout is up to date", plus `DataSourceTask.setLastContactTime(DataSource.NIGHTSCOUT)`
+   for every valid message (also status-only ones). Pass `site_change` to `ReceiveData.setSiteChangeTime()`.
+   With `status.upstream = no_data`, skip the Dexcom fallback checks entirely.
 4. While push delivers, reduce the Nightscout polling (e.g. only poll if no push for 7 minutes) – this
    is where the battery saving comes from.
 
 Not needed if push works: Cloudflare Access service-token support in the app.
 
-## 7. Testing push before relying on it
+## 7. Local delivery on home Wi-Fi (Home Assistant model, optional)
+
+Like the Home Assistant companion app's "persistent connection" on the home network, the app can receive
+the same messages directly from the relay while it is on a configured home Wi-Fi, without Firebase:
+
+- The relay additionally serves a WebSocket on the LAN (e.g. `ws://relay.lan:8765/v1/stream`). It sends
+  exactly the same encrypted `data` object as in FCM; plain `ws://` is acceptable because every
+  message is AES-GCM encrypted and authenticated. On connect, the relay sends the latest message.
+- The app opens the socket only while connected to one of the configured SSIDs (needs location
+  permission to read the SSID on current Android versions), from its existing foreground service,
+  with a ping every 60 s, and reconnects with backoff.
+- The relay keeps sending to FCM as well; the app drops duplicates by `seq`. (Skipping FCM for
+  connected phones would need per-device FCM tokens instead of a topic – not worth it at first.)
+- Why it is worth it: at night both phones are at home and asleep – exactly when FCM is most likely to
+  hold or downgrade messages, and exactly when a low matters most. Locally, delivery does not depend on
+  Google's priority decisions.
+- It does **not** help when the home internet is down: Nightscout then gets no Dexcom data either.
+- Cost: a permanently open Wi-Fi socket costs some battery (Home Assistant warns about the same);
+  measure it. Doze may still restrict network access for the app – the battery optimisation
+  exemption that GDH already asks for is required.
+
+## 8. Testing push before relying on it
 
 - Doze: `adb shell dumpsys deviceidle force-idle`, then send NORMAL and HIGH messages and measure the
   delay until GDH logs the value. Repeat with the screen off for 1+ hour (real Doze, not forced).
@@ -201,9 +253,11 @@ Not needed if push works: Cloudflare Access service-token support in the app.
 - Kill the relay / Nightscout / tunnel / home internet one at a time and confirm the app falls back
   (Nightscout polling, then Dexcom after 10 minutes) and that the Dexcom Follow app still alarms.
 
-## 8. Open questions
+## 9. Open questions
 
 - Exact Nightscout plugin for Dexcom (legacy `bridge` vs `connect`) in the current release.
 - Whether Tandem's displayed IOB includes Control-IQ basal changes (affects how far Nightscout's
   treatment-based IOB from tconnectsync is off). Real-time IOB would need ControlX2 on the child's phone.
 - Whether the app's foreground service changes FCM's high-priority downgrade behaviour.
+- Whether Nightscout exposes the state of its Dexcom connection (needed for `status.upstream`), or
+  whether the relay should poll Dexcom Share itself and feed Nightscout.

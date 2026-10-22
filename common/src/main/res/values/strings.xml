@@ -1110,4 +1110,7 @@ You can manage these permissions at any time in the Health Connect app settings.
     <string name="src_dexcom_share_fallback">Only as fallback for Nightscout</string>
     <string name="src_dexcom_share_fallback_summary">Only request Dexcom Share, if the Nightscout source has not reported a value for 10 minutes (e.g. server or connection down). Requires the Nightscout source to be enabled.</string>
     <string name="site_age_label">Pump site age</string>
+    <string name="fallback_nightscout_unreachable">Nightscout not reachable - using Dexcom Share.</string>
+    <string name="fallback_nightscout_behind">Nightscout is not receiving new values, but Dexcom Share has them - using Dexcom Share.</string>
+    <string name="fallback_no_upstream_data">No newer data on Dexcom Share either (checked %1$s): the sensor or the uploading phone is not sending.</string>
 </resources>

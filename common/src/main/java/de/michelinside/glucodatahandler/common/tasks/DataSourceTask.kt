@@ -224,6 +224,16 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
 
         fun getLatestServerValueTime(source: DataSource): Long = latestServerValueTime[source] ?: 0L
 
+        // Last time each source answered successfully (with or without a new value) - to distinguish
+        // "server not reachable" from "server reachable, but without new data".
+        private val lastContactTime = Collections.synchronizedMap(mutableMapOf<DataSource, Long>())
+
+        fun setLastContactTime(source: DataSource, time: Long = System.currentTimeMillis()) {
+            lastContactTime[source] = time
+        }
+
+        fun getLastContactTime(source: DataSource): Long = lastContactTime[source] ?: 0L
+
         fun getFirstNeedGraphValueTime(interval: Int, isFirstRequest: Boolean = false, forceReturnMinTime: Boolean = false): Long {
             val firstLastPair = dbAccess.getFirstLastTimestamp()
             val minTime = if(GlucoDataService.appSource == AppSource.AUTO_APP)
@@ -274,6 +284,8 @@ abstract class DataSourceTask(protected val enabledKey: String, protected val so
         }
         lastErrorCode = code
         lastState = state
+        if(state == SourceState.CONNECTED || state == SourceState.NO_NEW_VALUE)
+            setLastContactTime(source)
 
         SourceStateData.setState(source, state, getErrorMessage(state, error, code), getErrorInfo(code, message))
     }

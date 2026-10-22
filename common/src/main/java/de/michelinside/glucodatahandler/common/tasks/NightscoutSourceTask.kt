@@ -185,6 +185,9 @@ class NightscoutSourceTask: DataSourceTask(Constants.SHARED_PREF_NIGHTSCOUT_ENAB
 
     override fun getTrustAllCertificates(): Boolean = true
 
+    // explains, whether Dexcom Share (fallback) has data, while Nightscout has none
+    override fun getNoNewValueInfo(time: Long): String = DexcomShareSourceTask.fallbackInfo
+
     override fun checkPreferenceChanged(sharedPreferences: SharedPreferences, key: String?, context: Context): Boolean {
         var result = false
         if (key == null) {
