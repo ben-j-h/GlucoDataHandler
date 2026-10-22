@@ -759,6 +759,23 @@
                 android:value="300" />
         </service>
         <service
+            android:name=".SiteAgeComplication"
+            android:exported="true"
+            android:icon="@drawable/comp_icon_sensor_age"
+            android:label="@string/site_age_label"
+            android:permission="com.google.android.wearable.permission.BIND_COMPLICATION_PROVIDER">
+            <intent-filter>
+                <action android:name="android.support.wearable.complications.ACTION_COMPLICATION_UPDATE_REQUEST" />
+            </intent-filter>
+            <meta-data
+                android:name="android.support.wearable.complications.SUPPORTED_TYPES"
+                android:value="SHORT_TEXT,RANGED_VALUE" />
+            <!-- updated with every new glucose value, no periodic update needed -->
+            <meta-data
+                android:name="android.support.wearable.complications.UPDATE_PERIOD_SECONDS"
+                android:value="0" />
+        </service>
+        <service
             android:name=".TimeImageComplication"
             android:exported="true"
             android:icon="@drawable/comp_image_timestamp"

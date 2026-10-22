@@ -148,12 +148,18 @@ class GlucoseDetailsTileService : TileService() {
             ReceiveData.getGlucoseAsOtherUnit() + " " + ReceiveData.getOtherUnit()
         } else ""
 
-        if (sensorAge.isNotEmpty() || otherUnit.isNotEmpty()) {
-            if (sensorAge.isNotEmpty()) {
-                frame.addContent(deltaLine(sensorAge, 14f))
+        // pump site age (e.g. from Nightscout) in the same line as the sensor age
+        val siteAge = ReceiveData.getSiteAgeAsString(this)
+        val ageLine = listOf(sensorAge, if (siteAge.isNotEmpty()) "🩹 $siteAge" else "")
+            .filter { it.isNotEmpty() }
+            .joinToString("  ")
+
+        if (ageLine.isNotEmpty() || otherUnit.isNotEmpty()) {
+            if (ageLine.isNotEmpty()) {
+                frame.addContent(deltaLine(ageLine, 14f))
             }
             if (otherUnit.isNotEmpty()) {
-                if (sensorAge.isNotEmpty())
+                if (ageLine.isNotEmpty())
                     frame.addContent(spacer(3f))
                 frame.addContent(deltaLine(otherUnit, 16f))
             }
