@@ -24,10 +24,11 @@ object GlucoseGraphTileUpdater : NotifierInterface {
     var updateCount = 0
         private set
 
+    // No TIME_VALUE: the "X min" text ticks via a dynamic expression in the renderer and the graph
+    // itself reports its periodic redraws via GRAPH_CHANGED.
     val filter = mutableSetOf(
         NotifySource.SETTINGS,
         NotifySource.OBSOLETE_VALUE,
-        NotifySource.TIME_VALUE,
         NotifySource.GRAPH_CHANGED
     )
 

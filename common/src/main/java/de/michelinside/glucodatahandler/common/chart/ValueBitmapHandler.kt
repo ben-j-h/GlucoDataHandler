@@ -26,12 +26,13 @@ object ValueBitmapHandler : NotifierInterface {
 
     private data class ComboKey(val valueWidth: Int, val valueHeight: Int, val arrowWidth: Int, val arrowHeight: Int)
 
+    // The bitmaps only depend on value, trend, color and obsolete state - so no TIME_VALUE, which
+    // would re-render them every minute for nothing.
     private val filter = mutableSetOf(
         NotifySource.MESSAGECLIENT,
         NotifySource.BROADCAST,
         NotifySource.SETTINGS,
-        NotifySource.OBSOLETE_VALUE,
-        NotifySource.TIME_VALUE
+        NotifySource.OBSOLETE_VALUE
     )
 
     fun isRegistered(widget: String): Boolean = activeWidgets.contains(widget)
